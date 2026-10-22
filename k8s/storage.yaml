@@ -1,0 +1,87 @@
+# Stand-in for the two Compose named volumes (code-server-home, docker-data).
+# This cluster has no StorageClass/default provisioner, so storage is
+# statically provisioned as hostPath PVs on the single node, bound to the
+# PVCs below by explicit volumeName. Data survives pod restarts and
+# `kubectl delete namespace`; to wipe it (like `compose down -v`) delete the
+# PVs' node directories as documented in k8s/README.md.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: code-server-home
+  labels:
+    app.kubernetes.io/part-of: code-server-aio
+spec:
+  storageClassName: ""        # disable dynamic provisioning; static only
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  nodeAffinity:               # hostPath PVs are node-local
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - k8s-dev
+  hostPath:
+    path: /var/lib/code-server-aio/home
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: code-server-home
+  namespace: code-server
+  labels:
+    app.kubernetes.io/part-of: code-server-aio
+spec:
+  storageClassName: ""
+  volumeName: code-server-home
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: code-server-docker-data
+  labels:
+    app.kubernetes.io/part-of: code-server-aio
+spec:
+  storageClassName: ""
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - k8s-dev
+  hostPath:
+    path: /var/lib/code-server-aio/docker-data
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: code-server-docker-data
+  namespace: code-server
+  labels:
+    app.kubernetes.io/part-of: code-server-aio
+spec:
+  storageClassName: ""
+  volumeName: code-server-docker-data
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi

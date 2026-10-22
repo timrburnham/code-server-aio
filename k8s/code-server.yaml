@@ -1,0 +1,148 @@
+# Deployment translated from the `code-server` service in compose.yaml:
+#   privileged: true                    -> securityContext
+#   init: true                          -> not needed: supervisord is designed for
+#                                          PID 1 (it reaps children and handles TERM)
+#   restart: unless-stopped             -> Deployment restartPolicy: Always
+#   stop_grace_period: 150s             -> terminationGracePeriodSeconds
+#   healthcheck + start_period: 12m     -> startupProbe (12 min budget readiness
+#                                          mirror; kubelet waits it out)
+#   named volumes                       -> PVCs code-server-home / -docker-data
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: code-server
+  namespace: code-server
+  labels:
+    app.kubernetes.io/name: code-server
+    app.kubernetes.io/part-of: code-server-aio
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # single instance; like compose up replaces the container
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: code-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: code-server
+        app.kubernetes.io/part-of: code-server-aio
+    spec:
+      terminationGracePeriodSeconds: 150   # dockerd/code-server/haproxy stop in series
+      containers:
+        - name: code-server
+          image: ghcr.io/weeks-consulting/code-server-aio:4.141.0   # mirror of .env CODE_SERVER_IMAGE
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true                # Docker-in-Docker requires it
+          env:
+            - name: CF_ACCESS_TEAM_DOMAIN
+              valueFrom:
+                secretKeyRef:
+                  name: code-server-config
+                  key: CF_ACCESS_TEAM_DOMAIN
+                  optional: true            # unset = proxy stays 503-blocked, like compose
+            - name: CF_ACCESS_AUD
+              valueFrom:
+                secretKeyRef:
+                  name: code-server-config
+                  key: CF_ACCESS_AUD
+                  optional: true
+            - name: REPAIR_HOME_OWNERSHIP
+              valueFrom:
+                secretKeyRef:
+                  name: code-server-config
+                  key: REPAIR_HOME_OWNERSHIP
+                  optional: true            # image default: true
+            - name: HOMEBREW_INSTALL_TIMEOUT
+              valueFrom:
+                secretKeyRef:
+                  name: code-server-config
+                  key: HOMEBREW_INSTALL_TIMEOUT
+                  optional: true            # image default: 600
+          ports:
+            - name: http
+              containerPort: 8080           # HAProxy access proxy (expose: "8080")
+          volumeMounts:
+            - name: home                    # named volume code-server-home -> all of /home
+              mountPath: /home
+            - name: docker-data             # named volume docker-data -> nested Docker store
+              mountPath: /var/lib/docker
+            - name: probes
+              mountPath: /k8s-probes
+              readOnly: true
+          # Mirrors the Compose healthcheck definition (interval 30s, timeout 15s,
+          # start_period 12m, retries 3). See probe-configmap.yaml for the script.
+          startupProbe:
+            exec:
+              command: ["/bin/bash", "/k8s-probes/health"]
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 24            # 12 min start budget, like start_period
+          readinessProbe:
+            exec:
+              command: ["/bin/bash", "/k8s-probes/health"]
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["/bin/bash", "/k8s-probes/health"]
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: code-server-home
+        - name: docker-data
+          persistentVolumeClaim:
+            claimName: code-server-docker-data
+        - name: probes
+          configMap:
+            name: code-server-probes
+---
+# Same DNS name and port as the Compose service (`http://code-server:8080`),
+# so a remotely managed Cloudflare Tunnel configured with that origin needs no
+# dashboard changes when cloudflared moves into the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: code-server
+  namespace: code-server
+  labels:
+    app.kubernetes.io/name: code-server
+    app.kubernetes.io/part-of: code-server-aio
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: code-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# Local-only exposure for testing without the tunnel.
+# NOTE: bypasses Cloudflare Access authentication; remove when the tunnel and
+# Access policies are the intended path (kubectl -n code-server delete svc code-server-nodeport).
+apiVersion: v1
+kind: Service
+metadata:
+  name: code-server-nodeport
+  namespace: code-server
+  labels:
+    app.kubernetes.io/name: code-server
+    app.kubernetes.io/part-of: code-server-aio
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: code-server
+  ports:
+    - name: http
+      nodePort: 30080
+      port: 8080
+      targetPort: 8080

@@ -1,0 +1,71 @@
+# Health check translated from Compose's /usr/local/bin/container-healthcheck.
+# One adaptive script: it mirrors the shipped check exactly (expecting the
+# HAProxy 403-deny response) once CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD are
+# set, and relaxes to "any HTTP response" while Access is unconfigured. That
+# keeps a not-yet-configured deployment Ready (so NodePort/port-forward and the
+# tunnel can reach the 503 setup page) instead of failing the pod forever.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: code-server-probes
+  namespace: code-server
+  labels:
+    app.kubernetes.io/name: code-server
+    app.kubernetes.io/part-of: code-server-aio
+data:
+  health: |
+    #!/bin/bash
+    # Readiness: all supervisor services running, nested Docker ready,
+    # code-server answering, HAProxy enforcing Access (403) when Access is
+    # configured, or serving any HTTP response during bootstrap/unconfigured.
+    set -u
+
+    note() { echo "Not ready: $*" >&2; exit 1; }
+
+    state="$(/usr/bin/supervisorctl status 2>/dev/null)" \
+      || note "supervisorctl failed"
+    for svc in dockerd code-server haproxy access-keys service-events; do
+      echo "$state" | grep -Eq "^${svc}[[:space:]]+RUNNING([[:space:]]|$)" \
+        || note "$svc is not running"
+    done
+
+    /usr/bin/timeout 3 /usr/bin/docker info --format '{{.ServerVersion}}' \
+      >/dev/null 2>&1 || note "nested Docker not ready"
+
+    /usr/bin/timeout 3 /usr/bin/python3 - <<'PY' || note "HTTP checks failed"
+    import os
+    import sys
+    import urllib.error
+    import urllib.request
+
+    http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    try:
+        with http.open("http://127.0.0.1:8081/healthz", timeout=2) as response:
+            if response.status != 200:
+                sys.exit("code-server is not ready")
+    except Exception as error:
+        sys.exit(str(error))
+
+    try:
+        with http.open("http://127.0.0.1:8080/", timeout=2) as response:
+            status = response.status
+    except urllib.error.HTTPError as error:
+        status = error.code
+
+    # Legit settings only; .env.example-style placeholders count as unconfigured.
+    domain = os.environ.get("CF_ACCESS_TEAM_DOMAIN", "")
+    audience = os.environ.get("CF_ACCESS_AUD", "")
+    configured = bool(domain and audience
+                      and not domain.startswith("your-team.")
+                      and not audience.startswith("replace-with-"))
+
+    if configured:
+        if status != 403:
+            sys.exit(
+                f"Access proxy returned {status}, expected 403 "
+                "(Access is configured but not rejecting unauthenticated requests)"
+            )
+    elif status < 1:
+        sys.exit("Access proxy returned no HTTP response")
+    PY

@@ -1,0 +1,45 @@
+# Translation of the `cloudflared` service in compose.yaml (the .disabled
+# suffix keeps `kubectl apply -f k8s/` from deploying it until you're ready).
+# Enable with:
+#   1. Fill k8s/config.env (CLOUDFLARE_TUNNEL_TOKEN, CF_ACCESS_TEAM_DOMAIN,
+#      CF_ACCESS_AUD) and create the Secret:
+#        kubectl -n code-server create secret generic code-server-config \
+#          --from-env-file=k8s/config.env --dry-run=client -o yaml | kubectl apply -f -
+#   2. kubectl apply -f k8s/cloudflared.yaml.disabled
+#   3. Optionally tighten the health check in code-server.yaml (readme).
+# The tunnel's origin remains http://code-server:8080 (the Service above),
+# so no Cloudflare dashboard change is needed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: code-server
+  labels:
+    app.kubernetes.io/name: cloudflared
+    app.kubernetes.io/part-of: code-server-aio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloudflared
+        app.kubernetes.io/part-of: code-server-aio
+    spec:
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:latest
+          imagePullPolicy: IfNotPresent
+          args: ["tunnel", "--no-autoupdate", "run"]
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: code-server-config
+                  key: CLOUDFLARE_TUNNEL_TOKEN   # hard requirement, like compose's ${...:?}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
